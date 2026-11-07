@@ -1,0 +1,33 @@
+# Swift build artifacts
+.build/
+*.swiftmodule
+*.swiftdoc
+
+# Xcode
+xcuserdata/
+*.xcodeproj/
+*.xcworkspace/
+
+# macOS
+.DS_Store
+*.dSYM
+
+# Build outputs
+claude-click
+*.o
+*.dylib
+
+# Screenshots
+*.png
+!grid-screenshot-example.png
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*~

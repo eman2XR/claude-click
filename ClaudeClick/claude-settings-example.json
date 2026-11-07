@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/bin/claude-click:*)",
+      "Bash(sleep * && ~/bin/claude-click:*)",
+      "Bash($HOME/bin/claude-click:*)",
+      "Bash(sleep * && $HOME/bin/claude-click:*)"
+    ]
+  }
+}
