@@ -579,6 +579,175 @@ func runIndicator(labelText: String) {
     app.run()
 }
 
+// MARK: - Screen settle detection
+
+// Captures the main display downscaled to a small RGBA buffer for cheap frame-to-frame comparison.
+func captureDownscaledFrame(side: Int = 48) -> [UInt8]? {
+    guard let image = CGDisplayCreateImage(CGMainDisplayID()) else { return nil }
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let bytesPerRow = 4 * side
+    var buffer = [UInt8](repeating: 0, count: bytesPerRow * side)
+    let drew: Bool = buffer.withUnsafeMutableBytes { raw in
+        guard let ctx = CGContext(data: raw.baseAddress, width: side, height: side,
+                                  bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: colorSpace,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        ctx.interpolationQuality = .low
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+        return true
+    }
+    return drew ? buffer : nil
+}
+
+// Mean absolute difference between two equal-length frames, normalized to 0...1.
+func frameDifference(_ a: [UInt8], _ b: [UInt8]) -> Double {
+    guard a.count == b.count, !a.isEmpty else { return 1.0 }
+    var total = 0
+    for i in 0..<a.count { total += abs(Int(a[i]) - Int(b[i])) }
+    return Double(total) / Double(a.count) / 255.0
+}
+
+// Waits until two consecutive frames differ by less than threshold, or until timeout.
+// Returns true if the screen settled, false on timeout.
+@discardableResult
+func waitUntilScreenStable(timeout: Double = 5.0, interval: Double = 0.15, threshold: Double = 0.004) -> Bool {
+    let start = Date()
+    var previous = captureDownscaledFrame()
+    while Date().timeIntervalSince(start) < timeout {
+        usleep(UInt32(interval * 1_000_000))
+        let current = captureDownscaledFrame()
+        if let p = previous, let c = current, frameDifference(p, c) <= threshold {
+            return true
+        }
+        previous = current
+    }
+    return false
+}
+
+// MARK: - Action recorder (observation -> action trajectories)
+
+// Records an episode of (pre-action observation, action) steps built entirely from
+// claude-click's own primitives: a screenshot, the focused app, cursor position,
+// screen geometry, and optionally the accessibility tree. Intended for collecting
+// or inspecting computer-use trajectories.
+
+struct RecordingState: Codable {
+    var dir: String
+    var step: Int
+    var label: String
+    var ax: Bool
+    var startedAt: String
+}
+
+let recordingStatePath = "/tmp/claude-click-recording.json"
+
+func loadRecordingState() -> RecordingState? {
+    guard let data = FileManager.default.contents(atPath: recordingStatePath) else { return nil }
+    return try? JSONDecoder().decode(RecordingState.self, from: data)
+}
+
+func saveRecordingState(_ state: RecordingState) {
+    if let data = try? JSONEncoder().encode(state) {
+        try? data.write(to: URL(fileURLWithPath: recordingStatePath))
+    }
+}
+
+func isoTimestamp() -> String {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter.string(from: Date())
+}
+
+func fileTimestamp() -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyyMMdd-HHmmss"
+    return formatter.string(from: Date())
+}
+
+// Silently captures the main display to a JPEG at the given path (no stdout).
+@discardableResult
+func captureDisplayJPEG(to path: String, scale: CGFloat = 0.5, quality: CGFloat = 0.6) -> Bool {
+    guard let image = CGDisplayCreateImage(CGMainDisplayID()) else { return false }
+    let width = max(1, Int(CGFloat(image.width) * scale))
+    let height = max(1, Int(CGFloat(image.height) * scale))
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                              bytesPerRow: 0, space: colorSpace,
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+    ctx.interpolationQuality = .medium
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    guard let scaled = ctx.makeImage(),
+          let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, "public.jpeg" as CFString, 1, nil) else {
+        return false
+    }
+    CGImageDestinationAddImage(dest, scaled, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+    return CGImageDestinationFinalize(dest)
+}
+
+// Collects the frontmost app's accessibility tree as DumpedElements.
+func captureFrontmostAXTree() -> [DumpedElement]? {
+    guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+    let appElement = AXUIElementCreateApplication(app.processIdentifier)
+    var elements: [DumpedElement] = []
+    var elementId = 1
+    collectElements(appElement, elements: &elements, elementId: &elementId)
+    return elements
+}
+
+// If a recording is active, captures the pre-action observation and appends one step to episode.jsonl.
+func recordStep(actionType: String, details: [String: Any]) {
+    guard var state = loadRecordingState() else { return }
+    let step = state.step + 1
+    state.step = step
+    let base = String(format: "step_%04d_before", step)
+
+    let shotName = base + ".jpg"
+    let suppressing = beginScreenshotSuppressionIfNeeded()
+    captureDisplayJPEG(to: state.dir + "/" + shotName)
+    endScreenshotSuppression(suppressing)
+
+    var observation: [String: Any] = [
+        "screenshot": shotName,
+        "focused_app": NSWorkspace.shared.frontmostApplication?.localizedName ?? "",
+    ]
+    let cursor = currentCursorPoint()
+    observation["cursor"] = [Int(cursor.x), Int(cursor.y)]
+    if let screen = NSScreen.main {
+        observation["screen_points"] = [Int(screen.frame.width), Int(screen.frame.height)]
+        observation["scale"] = Double(screen.backingScaleFactor)
+    }
+    if state.ax, let elements = captureFrontmostAXTree(), let axData = try? JSONEncoder().encode(elements) {
+        let axName = base + ".ax.json"
+        try? axData.write(to: URL(fileURLWithPath: state.dir + "/" + axName))
+        observation["ax_dump"] = axName
+    }
+
+    var action: [String: Any] = ["type": actionType]
+    for (key, value) in details { action[key] = value }
+
+    let record: [String: Any] = [
+        "step": step,
+        "timestamp": isoTimestamp(),
+        "action": action,
+        "observation": observation,
+    ]
+
+    if let data = try? JSONSerialization.data(withJSONObject: record, options: []),
+       var line = String(data: data, encoding: .utf8) {
+        line += "\n"
+        let episodeURL = URL(fileURLWithPath: state.dir + "/episode.jsonl")
+        if let handle = try? FileHandle(forWritingTo: episodeURL) {
+            handle.seekToEndOfFile()
+            if let lineData = line.data(using: .utf8) { handle.write(lineData) }
+            try? handle.close()
+        } else {
+            try? line.data(using: .utf8)?.write(to: episodeURL)
+        }
+    }
+
+    saveRecordingState(state)
+}
+
+
 
 
 func runAppleScript(_ scriptSource: String) -> (success: Bool, output: String) {
@@ -3389,6 +3558,8 @@ func printUsage() {
         claude-click scroll <up|down|left|right> [amount] [--at <x> <y>] [--pixels] [--mods <combo>]  Scroll wheel
         claude-click cursor-position                 Report cursor position in points and pixels
         claude-click indicator <start|stop|status> [--label "text"]  On-screen badge while automating
+        claude-click wait-until-stable [timeout] [--threshold t] [--interval ms]  Wait until the screen stops changing
+        claude-click record <start|stop|status> [--label name] [--ax]  Record observation/action trajectories
         claude-click find-click <name> [app] [--double]  Find element and click it
         claude-click find-text-ocr <text> <app> [--double]  Find text via OCR and click
 
@@ -3683,6 +3854,7 @@ case "click":
     let px = Int(clickPoint.x)
     let py = Int(clickPoint.y)
 
+    recordStep(actionType: "click", details: ["x": px, "y": py, "double": isDouble, "right": isRight, "mods": clickModifiers.first ?? "", "pixels": usePixels])
     if isDouble {
         doubleClickMouse(x: px, y: py, flags: clickFlags)
     } else if isRight {
@@ -3699,7 +3871,9 @@ case "mouse-move":
         print("Usage: claude-click mouse-move <x> <y> [--pixels]")
         exit(1)
     }
-    moveMouse(to: pointCoordinate(x: x, y: y, pixels: arguments.contains("--pixels")))
+    let movePoint = pointCoordinate(x: x, y: y, pixels: arguments.contains("--pixels"))
+    recordStep(actionType: "mouse-move", details: ["x": Int(movePoint.x), "y": Int(movePoint.y)])
+    moveMouse(to: movePoint)
 
 case "mouse-down", "mouse-up":
     // Optional coordinate; without one, acts at the current cursor position.
@@ -3712,6 +3886,7 @@ case "mouse-down", "mouse-up":
     } else {
         point = currentCursorPoint()
     }
+    recordStep(actionType: command, details: ["x": Int(point.x), "y": Int(point.y)])
     if command == "mouse-down" {
         mouseButtonDown(at: point, flags: flags)
     } else {
@@ -3730,6 +3905,7 @@ case "drag":
     }
     let usePixels = arguments.contains("--pixels")
     let modifierTokens = arguments.firstIndex(of: "--mods").flatMap { $0 + 1 < arguments.count ? [arguments[$0 + 1]] : nil } ?? []
+    recordStep(actionType: "drag", details: ["x1": x1, "y1": y1, "x2": x2, "y2": y2, "pixels": usePixels])
     dragMouse(from: pointCoordinate(x: x1, y: y1, pixels: usePixels),
               to: pointCoordinate(x: x2, y: y2, pixels: usePixels),
               flags: parseModifierFlags(modifierTokens))
@@ -3753,6 +3929,7 @@ case "scroll":
         scrollPoint = pointCoordinate(x: ax, y: ay, pixels: arguments.contains("--pixels"))
     }
     let modifierTokens = arguments.firstIndex(of: "--mods").flatMap { $0 + 1 < arguments.count ? [arguments[$0 + 1]] : nil } ?? []
+    recordStep(actionType: "scroll", details: ["direction": direction, "amount": amount])
     scrollWheel(direction: direction, amount: amount, at: scrollPoint, flags: parseModifierFlags(modifierTokens))
 
 case "cursor-position":
@@ -3803,6 +3980,80 @@ case "indicator":
         print("Usage: claude-click indicator <start|stop|status> [--label \"text\"]")
     }
 
+case "wait-until-stable":
+    var stableTimeout = 5.0
+    var stableThreshold = 0.004
+    var stableInterval = 0.15
+    if arguments.count >= 3, let parsed = Double(arguments[2]) {
+        stableTimeout = parsed
+    }
+    if let i = arguments.firstIndex(of: "--threshold"), i + 1 < arguments.count, let value = Double(arguments[i + 1]) {
+        stableThreshold = value
+    }
+    if let i = arguments.firstIndex(of: "--interval"), i + 1 < arguments.count, let value = Double(arguments[i + 1]) {
+        stableInterval = value / 1000.0
+    }
+    let settled = waitUntilScreenStable(timeout: stableTimeout, interval: stableInterval, threshold: stableThreshold)
+    if settled {
+        print("Screen stable")
+    } else {
+        print("Timed out after \(stableTimeout)s waiting for screen to settle")
+        exit(1)
+    }
+
+case "record":
+    let sub = arguments.count >= 3 ? arguments[2] : "status"
+    switch sub {
+    case "start":
+        if loadRecordingState() != nil {
+            print("Already recording. Run 'record stop' first.")
+            break
+        }
+        var label = "recording"
+        if let i = arguments.firstIndex(of: "--label"), i + 1 < arguments.count { label = arguments[i + 1] }
+        let captureAX = arguments.contains("--ax")
+        var dir = ""
+        if let i = arguments.firstIndex(of: "--dir"), i + 1 < arguments.count { dir = arguments[i + 1] }
+        if dir.isEmpty {
+            dir = NSString(string: "~/.claude-click/recordings/\(fileTimestamp())").expandingTildeInPath
+        }
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        } catch {
+            print("Error: could not create recording directory: \(error)")
+            exit(1)
+        }
+        saveRecordingState(RecordingState(dir: dir, step: 0, label: label, ax: captureAX, startedAt: isoTimestamp()))
+        print("Recording started\(captureAX ? " (with AX trees)" : ""): \(dir)")
+        print("Each claude-click action now logs an observation and action to episode.jsonl. Run 'record stop' when done.")
+    case "stop":
+        if let state = loadRecordingState() {
+            let session: [String: Any] = [
+                "label": state.label,
+                "startedAt": state.startedAt,
+                "endedAt": isoTimestamp(),
+                "steps": state.step,
+                "dir": state.dir,
+                "ax": state.ax,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: session, options: [.prettyPrinted]) {
+                try? data.write(to: URL(fileURLWithPath: state.dir + "/session.json"))
+            }
+            try? FileManager.default.removeItem(atPath: recordingStatePath)
+            print("Recording stopped: \(state.step) steps -> \(state.dir)")
+        } else {
+            print("Not recording")
+        }
+    case "status":
+        if let state = loadRecordingState() {
+            print("Recording: \(state.step) steps so far -> \(state.dir)")
+        } else {
+            print("Not recording")
+        }
+    default:
+        print("Usage: claude-click record <start|stop|status> [--label name] [--dir path] [--ax]")
+    }
+
 case "find-click":
     guard arguments.count >= 3 else {
         print("Error: find-click requires an element name")
@@ -3848,6 +4099,7 @@ case "find-click":
     }
 
     let startTime = Date()
+    recordStep(actionType: "find-click", details: ["name": elementName, "app": appName ?? "", "double": isDouble, "right": isRight])
     findAndClick(name: elementName, appName: appName, doubleClick: isDouble, rightClick: isRight, offsetX: offsetX, offsetY: offsetY)
     let duration = Date().timeIntervalSince(startTime)
 
@@ -4060,6 +4312,7 @@ case "focus-click":
     }
     // A single click often only brings the window forward; the caret lands on
     // the second click. Click twice with a pause so typing that follows goes in.
+    recordStep(actionType: "focus-click", details: ["x": x, "y": y])
     clickMouse(x: x, y: y)
     usleep(400000)
     clickMouse(x: x, y: y)
@@ -4099,6 +4352,7 @@ case "type":
         }
     }
     let text = textParts.joined(separator: " ")
+    recordStep(actionType: "type", details: ["text": text, "delay_ms": typeDelayMs])
     typeText(text, delayMillis: typeDelayMs)
 
 case "press-key":
@@ -4107,6 +4361,7 @@ case "press-key":
         print("Usage: claude-click press-key <key>")
         exit(1)
     }
+    recordStep(actionType: "press-key", details: ["key": arguments[2]])
     pressKey(arguments[2])
 
 case "shortcut":
@@ -4121,6 +4376,7 @@ case "shortcut":
     // Last argument is the key, everything between app and key is modifiers
     let key = arguments.last!
     let modifiers = Array(arguments[3..<arguments.count-1])
+    recordStep(actionType: "shortcut", details: ["app": appName, "mods": modifiers.joined(separator: "+"), "key": key])
     keyboardShortcut(modifiers: modifiers, key: key, appName: appName)
 
 case "applescript":

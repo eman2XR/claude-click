@@ -79,6 +79,15 @@ Allow both `osascript` and `claude-click` in your AI agent's command/tool allowl
 - `claude-click indicator status` - Report whether the indicator is running
 - Once started, the badge shows only while a claude-click command ran in the last ~2.5s and hides when idle. It also hides during claude-click screenshots so it does not appear in captured images.
 
+**Settle Detection**
+- `claude-click wait-until-stable [timeout] [--threshold t] [--interval ms]` - Block until the screen stops changing (two consecutive frames below the difference threshold) or the timeout elapses. Use after an action that triggers animation, before the next screenshot or action. Exit 0 if settled, 1 on timeout.
+
+**Recording (observation/action trajectories)**
+- `claude-click record start [--label name] [--dir path] [--ax]` - Begin recording. While active, every claude-click action logs a step to `episode.jsonl`: the pre-action observation (screenshot, focused app, cursor, screen geometry, and the accessibility tree when `--ax` is set) plus the action and its arguments.
+- `claude-click record stop` - Finish and write `session.json`.
+- `claude-click record status` - Show whether a recording is active and the step count.
+- Default output directory: `~/.claude-click/recordings/<timestamp>/`. Built entirely from claude-click's own primitives.
+
 **Timing**
 - `claude-click wait <seconds>` - Wait (supports decimals) - USE SPARINGLY
 - `claude-click wait-for-element <name> <app> [timeout]` - Wait for element (PREFERRED - faster and more reliable)
