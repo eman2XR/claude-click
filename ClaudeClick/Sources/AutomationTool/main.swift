@@ -903,19 +903,20 @@ func postKeyStroke(code: CGKeyCode, flags: CGEventFlags = [], holdMicros: UInt32
     keyUp?.post(tap: .cghidEventTap)
 }
 
-func typeText(_ text: String, delayMillis: Double = 40) {
-    // Check if we should re-activate an app (after clicking a text field)
-    let appNamePath = "/tmp/claude-click-last-app.txt"
-    if let savedAppName = try? String(contentsOfFile: appNamePath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-       !savedAppName.isEmpty {
-        // Re-activate the saved app
-        let workspace = NSWorkspace.shared
-        if let app = workspace.runningApplications.first(where: { $0.localizedName == savedAppName }) {
-            app.activate(options: [.activateIgnoringOtherApps])
-            usleep(200000) // 200ms for activation
+func typeText(_ text: String, delayMillis: Double = 40, reactivateLastApp: Bool = false) {
+    // Optionally re-activate an app saved by a prior find-click. Off by default:
+    // re-activating steals focus from a field a click just focused.
+    if reactivateLastApp {
+        let appNamePath = "/tmp/claude-click-last-app.txt"
+        if let savedAppName = try? String(contentsOfFile: appNamePath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           !savedAppName.isEmpty {
+            let workspace = NSWorkspace.shared
+            if let app = workspace.runningApplications.first(where: { $0.localizedName == savedAppName }) {
+                app.activate(options: [.activateIgnoringOtherApps])
+                usleep(200000) // 200ms for activation
+            }
+            try? FileManager.default.removeItem(atPath: appNamePath)
         }
-        // Clear the saved app
-        try? FileManager.default.removeItem(atPath: appNamePath)
     }
 
     let perCharDelay = UInt32(max(0, delayMillis) * 1000)
@@ -3544,6 +3545,148 @@ func watchXcodeConsole() {
     }
 }
 
+// MARK: - Observe (structured observation for agents)
+
+// Reads the app's AX focused element and returns its role and text value — the
+// content (document / field text) that an agent needs to verify a result.
+// Returns the focused AX element of the frontmost (or named) application.
+func focusedAXElement(appName: String?) -> AXUIElement? {
+    let workspace = NSWorkspace.shared
+    let app: NSRunningApplication?
+    if let name = appName {
+        app = workspace.runningApplications.first(where: { ($0.localizedName ?? "").lowercased().contains(name.lowercased()) })
+    } else {
+        app = workspace.frontmostApplication
+    }
+    guard let pid = app?.processIdentifier else { return nil }
+    var focused: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(AXUIElementCreateApplication(pid), kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+          let raw = focused, CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+    return (raw as! AXUIElement)
+}
+
+// Replaces the focused text element's whole value through Accessibility. Unlike
+// cmd+a followed by typing, this cannot be swallowed by pending autocorrect state.
+func setFocusedValue(_ text: String, appName: String?) -> Bool {
+    guard let element = focusedAXElement(appName: appName) else { return false }
+    var settable: DarwinBoolean = false
+    guard AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success, settable.boolValue else {
+        return false
+    }
+    return AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFString) == .success
+}
+
+// Selects all text in the focused text element by setting its selected range.
+func selectAllInFocused(appName: String?) -> Bool {
+    guard let element = focusedAXElement(appName: appName) else { return false }
+    var valueRef: CFTypeRef?
+    AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef)
+    let length = ((valueRef as? String) ?? "").utf16.count
+    var range = CFRange(location: 0, length: length)
+    guard let rangeValue = AXValueCreate(.cfRange, &range) else { return false }
+    return AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, rangeValue) == .success
+}
+
+func focusedElementInfo(_ appElement: AXUIElement) -> (role: String, value: String)? {
+    var focused: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+          let raw = focused, CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+    let element = raw as! AXUIElement
+    var roleRef: CFTypeRef?
+    AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+    var valueRef: CFTypeRef?
+    AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef)
+    return ((roleRef as? String) ?? "", (valueRef as? String) ?? "")
+}
+
+// Builds a structured observation: focused app, screen geometry, the focused
+// element's text/value, a clean interactive-element list, and a screenshot path.
+func buildObservation(appName: String?) -> [String: Any] {
+    let workspace = NSWorkspace.shared
+    var result: [String: Any] = [:]
+    let app: NSRunningApplication?
+    if let name = appName {
+        app = workspace.runningApplications.first(where: { ($0.localizedName ?? "").lowercased().contains(name.lowercased()) })
+        if app == nil {
+            result["error"] = "application '\(name)' is not running"
+            return result
+        }
+    } else {
+        app = workspace.frontmostApplication
+    }
+
+    guard let app = app else {
+        result["error"] = "no frontmost application"
+        return result
+    }
+    result["focused_app"] = app.localizedName ?? (appName ?? "")
+
+    if let screen = NSScreen.main {
+        let scale = Double(screen.backingScaleFactor)
+        result["screen"] = [
+            "points": [Int(screen.frame.width), Int(screen.frame.height)],
+            "pixels": [Int(screen.frame.width * CGFloat(scale)), Int(screen.frame.height * CGFloat(scale))],
+            "scale": scale,
+        ]
+    }
+
+    let appElement = AXUIElementCreateApplication(app.processIdentifier)
+
+    // Title of the focused window (page title in a browser, folder name in Finder).
+    var windowRef: CFTypeRef?
+    if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
+       let window = windowRef, CFGetTypeID(window) == AXUIElementGetTypeID() {
+        var titleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(window as! AXUIElement, kAXTitleAttribute as CFString, &titleRef)
+        if let title = titleRef as? String, !title.isEmpty {
+            result["window_title"] = title
+        }
+    }
+
+    if let focused = focusedElementInfo(appElement) {
+        result["focused_element"] = ["role": focused.role, "value": focused.value]
+    }
+
+    var elements: [DumpedElement] = []
+    var elementId = 1
+    collectElements(appElement, elements: &elements, elementId: &elementId)
+
+    // Visible static text (results, labels, page text) so an agent can read outcomes.
+    var seenText = Set<String>()
+    var texts: [String] = []
+    for element in elements where element.role == "AXStaticText" {
+        let raw = element.value.flatMap { $0.isEmpty ? nil : $0 } ?? element.title
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.count <= 120, seenText.insert(text).inserted else { continue }
+        texts.append(text)
+        if texts.count >= 30 { break }
+    }
+    result["texts"] = texts
+    let clickableRoles: Set<String> = ["AXButton", "AXMenuButton", "AXTextField", "AXTextArea",
+                                       "AXCheckBox", "AXRadioButton", "AXLink", "AXPopUpButton"]
+    var seen = Set<String>()
+    var out: [[String: Any]] = []
+    for element in elements {
+        let raw = element.title.isEmpty ? (element.description.isEmpty ? (element.value ?? "") : element.description) : element.title
+        let label = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clickableRoles.contains(element.role), !label.isEmpty, label.count <= 60, !label.lowercased().hasPrefix("rgb ") else { continue }
+        if !seen.insert(element.role + "|" + label).inserted { continue }
+        var item: [String: Any] = ["role": element.role, "label": label,
+                                   "x": element.x, "y": element.y, "width": element.width, "height": element.height,
+                                   "enabled": element.enabled]
+        if let value = element.value, !value.isEmpty { item["value"] = value }
+        out.append(item)
+        if out.count >= 60 { break }
+    }
+    result["elements"] = out
+
+    let shotPath = "/tmp/claude-click-observe.jpg"
+    if captureDisplayJPEG(to: shotPath, scale: 0.5, quality: 0.6) {
+        result["screenshot"] = shotPath
+    }
+    return result
+}
+
 func printUsage() {
     print("""
     claude-click - macOS UI Automation Tool
@@ -3569,7 +3712,7 @@ func printUsage() {
         claude-click clear-field <name> <app>        Clear text field contents
 
       Keyboard & Text Input:
-        claude-click type "<text>" [--delay-ms <n>]  Type text (real key codes; default 40ms per key)
+        claude-click type "<text>" [--delay-ms <n>] [--app <name>] [--require-frontmost <name>] [--reactivate]  Type text (real key codes; default 40ms per key)
         claude-click press-key <key>                 Press special key or single character
         claude-click shortcut <app> <mod> <key>      Execute keyboard shortcut in specific app
         claude-click applescript '<script>'          Execute AppleScript code
@@ -3586,6 +3729,7 @@ func printUsage() {
       Screenshots & Debugging:
         claude-click screenshot [app] <file.jpg|file.png>  Take screenshot (JPEG=fast, PNG=high quality)
         claude-click dump <app|screen> <output>      Dump elements to JSON + annotated PNG
+        claude-click observe [app]                   Structured JSON: focused app, focused element text, elements, screenshot
         claude-click focus-click <x> <y>             Click twice to focus a field before typing
         claude-click screen-info                     Show screen size in points and pixels
         claude-click check-permissions               Check accessibility and screen recording permissions
@@ -4333,27 +4477,136 @@ case "screen-info":
         print("Screen size (pixels): \(pixelWidth) x \(pixelHeight)")
     }
 
+case "set-value":
+    // Replace the focused text field/area contents via Accessibility.
+    guard arguments.count >= 3 else {
+        print("Error: set-value requires text")
+        print("Usage: claude-click set-value \"<text>\" [--app <name>]")
+        exit(1)
+    }
+    var setValueApp: String? = nil
+    var setValueParts: [String] = []
+    var setValueIndex = 2
+    while setValueIndex < arguments.count {
+        if arguments[setValueIndex] == "--app", setValueIndex + 1 < arguments.count {
+            setValueApp = arguments[setValueIndex + 1]
+            setValueIndex += 2
+        } else {
+            setValueParts.append(arguments[setValueIndex])
+            setValueIndex += 1
+        }
+    }
+    let newValue = setValueParts.joined(separator: " ")
+    recordStep(actionType: "set-value", details: ["text": newValue])
+    if setFocusedValue(newValue, appName: setValueApp) {
+        print("Set value: \(newValue)")
+    } else {
+        print("Error: the focused element's value is not settable")
+        exit(1)
+    }
+
+case "move-to-end":
+    // Put the caret at the end of the focused text element via Accessibility.
+    let endApp = arguments.count >= 3 ? arguments[2] : nil
+    recordStep(actionType: "move-to-end", details: [:])
+    if let element = focusedAXElement(appName: endApp) {
+        var valueRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef)
+        let text = (valueRef as? String) ?? ""
+        var range = CFRange(location: text.utf16.count, length: 0)
+        if let rangeValue = AXValueCreate(.cfRange, &range),
+           AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, rangeValue) == .success {
+            print("Moved caret to end (ends with newline: \(text.hasSuffix("\n") ? "yes" : "no"), empty: \(text.isEmpty ? "yes" : "no"))")
+        } else {
+            print("Error: could not move the caret in the focused element")
+            exit(1)
+        }
+    } else {
+        print("Error: no focused element")
+        exit(1)
+    }
+
+case "select-all":
+    // Select all text in the focused text element via Accessibility.
+    let selectApp = arguments.count >= 3 ? arguments[2] : nil
+    recordStep(actionType: "select-all", details: [:])
+    if selectAllInFocused(appName: selectApp) {
+        print("Selected all text")
+    } else {
+        print("Error: could not select text in the focused element")
+        exit(1)
+    }
+
+case "observe":
+    // Structured JSON observation for agents: focused app, screen geometry, the
+    // focused element's text/value, a clean interactive-element list, screenshot.
+    var observeApp: String? = nil
+    if arguments.count >= 3, !arguments[2].hasPrefix("--") {
+        observeApp = arguments[2]
+    }
+    let observation = buildObservation(appName: observeApp)
+    if let data = try? JSONSerialization.data(withJSONObject: observation, options: [.prettyPrinted, .sortedKeys]),
+       let json = String(data: data, encoding: .utf8) {
+        print(json)
+        if observation["error"] != nil { exit(1) }
+    } else {
+        print("{\"error\":\"failed to serialize observation\"}")
+        exit(1)
+    }
+
 case "type":
     guard arguments.count >= 3 else {
         print("Error: type requires text to type")
-        print("Usage: claude-click type \"<text>\" [--delay-ms <n>]")
+        print("Usage: claude-click type \"<text>\" [--delay-ms <n>] [--app <name>] [--require-frontmost <name>] [--reactivate]")
         exit(1)
     }
     var typeDelayMs = 40.0
+    var typeApp: String? = nil
+    var requireFrontmost: String? = nil
+    var reactivate = false
     var textParts: [String] = []
     var argIndex = 2
     while argIndex < arguments.count {
         if arguments[argIndex] == "--delay-ms", argIndex + 1 < arguments.count, let value = Double(arguments[argIndex + 1]) {
             typeDelayMs = value
             argIndex += 2
+        } else if arguments[argIndex] == "--app", argIndex + 1 < arguments.count {
+            typeApp = arguments[argIndex + 1]
+            argIndex += 2
+        } else if arguments[argIndex] == "--require-frontmost", argIndex + 1 < arguments.count {
+            requireFrontmost = arguments[argIndex + 1]
+            argIndex += 2
+        } else if arguments[argIndex] == "--reactivate" {
+            reactivate = true
+            argIndex += 1
         } else {
             textParts.append(arguments[argIndex])
             argIndex += 1
         }
     }
+    // Optional explicit target: activate it before typing (does not steal focus
+    // from a field the way the implicit last-app reactivation did).
+    if let target = typeApp {
+        let workspace = NSWorkspace.shared
+        if let app = workspace.runningApplications.first(where: { ($0.localizedName ?? "").lowercased().contains(target.lowercased()) }) {
+            app.activate(options: [.activateIgnoringOtherApps])
+            usleep(250000)
+        } else {
+            print("Error: app '\(target)' is not running")
+            exit(1)
+        }
+    }
+    // Safety guard: refuse to type unless the expected app is frontmost.
+    if let expected = requireFrontmost {
+        let front = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
+        if !front.lowercased().contains(expected.lowercased()) {
+            print("Error: refusing to type — frontmost app is '\(front)', not '\(expected)'")
+            exit(1)
+        }
+    }
     let text = textParts.joined(separator: " ")
     recordStep(actionType: "type", details: ["text": text, "delay_ms": typeDelayMs])
-    typeText(text, delayMillis: typeDelayMs)
+    typeText(text, delayMillis: typeDelayMs, reactivateLastApp: reactivate)
 
 case "press-key":
     guard arguments.count >= 3 else {

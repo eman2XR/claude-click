@@ -98,6 +98,18 @@ claude-click indicator start                    # Badge that appears top-right o
 claude-click indicator stop                     # Turn it off
 ```
 
+### For AI Agents
+```bash
+claude-click observe [app]                      # JSON: focused app, window title, focused field text, visible text, elements, screenshot
+claude-click set-value "text"                   # Replace the focused field's text via Accessibility
+claude-click select-all                         # Select all text in the focused field via Accessibility
+claude-click move-to-end                        # Move the caret to the end of the focused field
+claude-click wait-until-stable [timeout]        # Wait until the screen stops changing
+claude-click record start [--ax] / stop         # Record observation→action trajectories to episode.jsonl
+claude-click type "text" --require-frontmost TextEdit   # Refuse to type unless that app is frontmost
+```
+The Accessibility-based text commands are more reliable than `cmd+a` + typing: after synthetic typing, pending autocorrect can swallow the next keystroke.
+
 ### App Management
 ```bash
 claude-click wait-for-app-launch "App" 10 --activate   # Wait for launch + activate

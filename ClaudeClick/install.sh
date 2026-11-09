@@ -12,7 +12,14 @@ swift build -c release --disable-sandbox
 echo "Installing to ~/bin/..."
 mkdir -p ~/bin
 
-# Install the binary
+# Stop any running instance (e.g. the indicator daemon) and remove the old file
+# first. Copying over a binary that is currently mapped/running corrupts it and
+# causes the kernel to SIGKILL every later launch.
+pkill -f "$HOME/bin/claude-click" 2>/dev/null || true
+sleep 0.3
+rm -f ~/bin/claude-click
+
+# Install the binary (fresh inode)
 cp .build/release/claude-click ~/bin/claude-click
 chmod +x ~/bin/claude-click
 

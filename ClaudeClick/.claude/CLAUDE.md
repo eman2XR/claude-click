@@ -88,6 +88,14 @@ Allow both `osascript` and `claude-click` in your AI agent's command/tool allowl
 - `claude-click record status` - Show whether a recording is active and the step count.
 - Default output directory: `~/.claude-click/recordings/<timestamp>/`. Built entirely from claude-click's own primitives.
 
+**Observation & Accessibility Text Editing (for agents)**
+- `claude-click observe [app]` - JSON with `focused_app`, `window_title`, `focused_element` (role + its text value), `texts` (visible static text, e.g. a calculator result), clickable `elements` with frames, `screen` geometry, and a `screenshot` path. Exits 1 with an `error` field if the named app is not running.
+- `claude-click set-value "text" [--app name]` - Replace the focused field's whole text via Accessibility.
+- `claude-click select-all [app]` - Select all text in the focused field via Accessibility.
+- `claude-click move-to-end [app]` - Put the caret at the end of the focused field.
+- Prefer these over `cmd+a` + typing: after synthetic typing, pending autocorrect can swallow the next keystroke, so a `cmd+a` may silently fail and new text gets appended.
+- `claude-click type "text" --require-frontmost <app>` refuses to type unless that app is frontmost; `--app <name>` activates the app first. Implicit re-activation of the last clicked app is now opt-in (`--reactivate`).
+
 **Timing**
 - `claude-click wait <seconds>` - Wait (supports decimals) - USE SPARINGLY
 - `claude-click wait-for-element <name> <app> [timeout]` - Wait for element (PREFERRED - faster and more reliable)
