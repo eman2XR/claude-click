@@ -126,10 +126,10 @@ shortcut Xcode cmd r
 
 **❌ May fail:**
 ```
-activate-app Xcode3
+activate-app Xcode-beta
 ```
 
-**Reason:** Xcode's running app name may differ from the app bundle name. The app bundle might be "Xcode3.app" but the running process name is "Xcode". Always use `focused-app` or `list-apps` to check the actual running app name. When commands fail, verify the app name first.
+**Reason:** Xcode's running app name may differ from the app bundle name. The app bundle might be "Xcode-beta.app" but the running process name is "Xcode". Always use `focused-app` or `list-apps` to check the actual running app name. When commands fail, verify the app name first.
 
 ---
 

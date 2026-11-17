@@ -10,49 +10,32 @@ Currently geared towards Xcode development with features for app launching, buil
 
 ## Installation
 
-**Option 1: Use Claude Code (Recommended)**
+**With Claude Code:** paste this into a Claude Code session:
 
-Ask Claude Code to install claude-click for you - it should handle everything automatically based on the `.claude/INSTALLATION.md` file.
+> Install claude-click from https://github.com/eman2XR/claude-click: clone it, run `ClaudeClick/install.sh`, then walk me through granting the macOS permissions.
 
-**Option 2: Manual Installation**
+**Manually:**
 
 ```bash
-cd ClaudeClick
-./install.sh
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-claude-click check-permissions  # Grant accessibility and screen recording permissions
+git clone https://github.com/eman2XR/claude-click.git ~/claude-click
+cd ~/claude-click/ClaudeClick && ./install.sh
 ```
 
-## Claude Code Integration
+`install.sh` builds the tool, installs it to `~/bin/claude-click`, and installs a Claude Code skill to `~/.claude/skills/claude-click/` so every Claude session knows how to use it. Then:
 
-Add permissions to `~/.claude/settings.json`:
+1. Put `~/bin` on your PATH: add `export PATH="$HOME/bin:$PATH"` to `~/.zshrc`.
+2. Grant **Accessibility** and **Screen Recording** to the app that runs Claude Code (Terminal, iTerm, VS Code, ...) in System Settings > Privacy & Security. Quit and reopen that app, then run `claude-click check-permissions`.
+3. Restart Claude Code.
+
+Optionally, let Claude Code run claude-click without asking each time, in `~/.claude/settings.json`:
 
 ```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(~/bin/claude-click:*)",
-      "Bash(sleep * && ~/bin/claude-click:*)"
-    ]
-  }
-}
+{ "permissions": { "allow": ["Bash(~/bin/claude-click:*)"] } }
 ```
 
-Optionally, add as a tool with this one-liner:
+Requirements: macOS 13 or later, Xcode or the Command Line Tools (Swift 5.9+). The clone is about 80 MB because it includes a small on-device text model used by `search-tasks`.
 
-```bash
-mkdir -p ~/.claude/tools && cat > ~/.claude/tools/claude-click.json << 'EOF'
-{
-  "name": "claude-click",
-  "description": "macOS computer use tool - can click, type, scroll, drag, screenshot, and verify UI state",
-  "command": "~/bin/claude-click",
-  "args": []
-}
-EOF
-```
-
-Restart Claude Code after updating.
+**Activity indicator:** a "claude-click active" badge appears in the top-right corner whenever claude-click is acting, so you can tell when an agent is driving the Mac. Turn it off with `claude-click indicator disable` (or set `CLAUDE_CLICK_NO_INDICATOR=1`).
 
 ## Quick Start
 
@@ -65,7 +48,7 @@ claude-click screenshot                  # Take screenshot
 ```
 
 **Troubleshooting:**
-- App not found? Use `list-apps` to find exact name (e.g., "Xcode3" not "Xcode")
+- App not found? Use `list-apps` to find the exact running name
 - Keyboard not working? Check focus with `focused-app`, use `find-click` first
 - Testing Xcode apps? Never use `open -a` - use `shortcut Xcode cmd r` + `wait-for-app-launch "App" 60 --activate`
 
@@ -94,8 +77,8 @@ claude-click mouse-move 400 300                 # Hover (also: mouse-down/up, cu
 
 ### Activity Indicator
 ```bash
-claude-click indicator start                    # Badge that appears top-right only while claude-click acts
-claude-click indicator stop                     # Turn it off
+claude-click indicator status                   # The badge starts automatically and shows only while claude-click acts
+claude-click indicator disable                  # Turn it off (indicator enable to turn it back on)
 ```
 
 ### For AI Agents

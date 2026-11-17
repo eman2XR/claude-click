@@ -482,6 +482,37 @@ func indicatorIsRunning() -> Bool {
     return kill(pid, 0) == 0
 }
 
+// Persistent opt-out written by `indicator disable`; CLAUDE_CLICK_NO_INDICATOR=1 also opts out.
+let indicatorDisabledPath = NSString(string: "~/.claude-click/indicator-disabled").expandingTildeInPath
+
+func indicatorDisabled() -> Bool {
+    ProcessInfo.processInfo.environment["CLAUDE_CLICK_NO_INDICATOR"] == "1"
+        || FileManager.default.fileExists(atPath: indicatorDisabledPath)
+}
+
+// Launches the detached helper process that hosts the indicator overlay.
+@discardableResult
+func launchIndicatorHelper(label: String) -> Int32? {
+    let helper = Process()
+    helper.executableURL = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
+    helper.arguments = ["indicator", "_run", "--label", label]
+    helper.standardOutput = FileHandle.nullDevice
+    helper.standardError = FileHandle.nullDevice
+    do {
+        try helper.run()
+    } catch {
+        return nil
+    }
+    try? "\(helper.processIdentifier)".write(toFile: indicatorPidPath, atomically: true, encoding: .utf8)
+    return helper.processIdentifier
+}
+
+// Starts the indicator on first use so every user sees when claude-click is acting.
+func ensureIndicatorRunning() {
+    guard !indicatorDisabled(), !indicatorIsRunning() else { return }
+    launchIndicatorHelper(label: "claude-click active")
+}
+
 // Called by screenshot commands: if the indicator is running, flag a short
 // suppression window and wait for it to hide. Returns whether suppression was engaged.
 func beginScreenshotSuppressionIfNeeded() -> Bool {
@@ -2323,8 +2354,8 @@ func findAndClick(name: String, appName: String? = nil, doubleClick: Bool = fals
                 let localizedName = runningApp.localizedName ?? ""
                 let bundleURL = runningApp.bundleURL?.lastPathComponent ?? ""
 
-                // Priority 1: Exact bundle name match (e.g., "Xcode3.app" matches "Xcode3")
-                // This prevents "Xcode" from matching when we want "Xcode3"
+                // Priority 1: Exact bundle name match (e.g., "Xcode-beta.app" matches "Xcode-beta")
+                // This prevents "Xcode" from matching when we want "Xcode-beta"
                 if bundleURL.lowercased() == app.lowercased() + ".app" {
                     exactBundleMatch = runningApp
                     break
@@ -3700,7 +3731,7 @@ func printUsage() {
         claude-click drag <x1> <y1> <x2> <y2> [--pixels] [--mods <combo>]  Press, drag and release
         claude-click scroll <up|down|left|right> [amount] [--at <x> <y>] [--pixels] [--mods <combo>]  Scroll wheel
         claude-click cursor-position                 Report cursor position in points and pixels
-        claude-click indicator <start|stop|status> [--label "text"]  On-screen badge while automating
+        claude-click indicator <status|disable|enable|start|stop>  On-screen badge while acting (starts automatically)
         claude-click wait-until-stable [timeout] [--threshold t] [--interval ms]  Wait until the screen stops changing
         claude-click record <start|stop|status> [--label name] [--ax]  Record observation/action trajectories
         claude-click find-click <name> [app] [--double]  Find element and click it
@@ -3810,9 +3841,9 @@ func printUsage() {
 
       Xcode automation:
         claude-click xcode-build-run-app ~/Desktop/MyProject.xcodeproj MyApp
-        claude-click xcode-build-run-app ~/Desktop/Project.xcodeproj App 120 --xcode Xcode3
+        claude-click xcode-build-run-app ~/Desktop/Project.xcodeproj App 120 --xcode Xcode-beta
         claude-click xcode-run ~/Desktop/MyProject.xcodeproj MyApp
-        claude-click xcode-run ~/Desktop/Project.xcodeproj App --xcode Xcode3
+        claude-click xcode-run ~/Desktop/Project.xcodeproj App --xcode Xcode-beta
         claude-click xcode-get-build-errors
         claude-click xcode-test-results              # Human-readable output
         claude-click xcode-test-results --json       # JSON output for parsing
@@ -3932,6 +3963,9 @@ let command = arguments[1]
 // is driving the machine. The indicator subcommands manage the overlay itself.
 if command != "indicator" {
     recordActivityHeartbeat()
+    if !["help", "--help", "-h"].contains(command) {
+        ensureIndicatorRunning()
+    }
 }
 
 switch command {
@@ -4095,17 +4129,10 @@ case "indicator":
             print("Indicator already running")
             break
         }
-        let helper = Process()
-        helper.executableURL = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
-        helper.arguments = ["indicator", "_run", "--label", indicatorLabel]
-        helper.standardOutput = FileHandle.nullDevice
-        helper.standardError = FileHandle.nullDevice
-        do {
-            try helper.run()
-            try? "\(helper.processIdentifier)".write(toFile: indicatorPidPath, atomically: true, encoding: .utf8)
-            print("Indicator started (pid \(helper.processIdentifier))")
-        } catch {
-            print("Error: could not start indicator: \(error)")
+        if let pid = launchIndicatorHelper(label: indicatorLabel) {
+            print("Indicator started (pid \(pid))")
+        } else {
+            print("Error: could not start indicator")
         }
     case "stop":
         if let pidText = try? String(contentsOfFile: indicatorPidPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
@@ -4114,14 +4141,28 @@ case "indicator":
         }
         try? FileManager.default.removeItem(atPath: indicatorPidPath)
         try? FileManager.default.removeItem(atPath: indicatorSuppressPath)
-        print("Indicator stopped")
+        print("Indicator stopped (it starts again on the next command; use 'indicator disable' to turn it off)")
+    case "disable":
+        try? FileManager.default.createDirectory(atPath: (indicatorDisabledPath as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: indicatorDisabledPath, contents: nil)
+        if let pidText = try? String(contentsOfFile: indicatorPidPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           let pid = Int32(pidText) {
+            kill(pid, SIGTERM)
+        }
+        try? FileManager.default.removeItem(atPath: indicatorPidPath)
+        print("Indicator disabled; it will no longer start automatically")
+    case "enable":
+        try? FileManager.default.removeItem(atPath: indicatorDisabledPath)
+        ensureIndicatorRunning()
+        print("Indicator enabled")
     case "status":
-        print(indicatorIsRunning() ? "Indicator running" : "Indicator not running")
+        let state = indicatorIsRunning() ? "running" : "not running"
+        print("Indicator \(state)\(indicatorDisabled() ? " (disabled)" : " (starts automatically)")")
     case "_run":
         // Internal: the detached helper process that hosts the overlay window.
         runIndicator(labelText: indicatorLabel)
     default:
-        print("Usage: claude-click indicator <start|stop|status> [--label \"text\"]")
+        print("Usage: claude-click indicator <start|stop|status|enable|disable> [--label \"text\"]")
     }
 
 case "wait-until-stable":
@@ -5049,7 +5090,7 @@ case "xcode-build-run-app":
         print("Usage: claude-click xcode-build-run-app <project-path> <app-name> [timeout] [--xcode XcodeVersion]")
         print("Example: claude-click xcode-build-run-app ~/Desktop/MyProject.xcodeproj MyApp")
         print("Example: claude-click xcode-build-run-app ~/Desktop/MyProject.xcodeproj MyApp 120")
-        print("Example: claude-click xcode-build-run-app ~/Desktop/MyProject.xcodeproj MyApp 60 --xcode Xcode3")
+        print("Example: claude-click xcode-build-run-app ~/Desktop/MyProject.xcodeproj MyApp 60 --xcode Xcode-beta")
         exit(1)
     }
 
@@ -5138,7 +5179,7 @@ case "xcode-run":
         print("Error: xcode-run requires project path and app name")
         print("Usage: claude-click xcode-run <project-path> <app-name> [--xcode XcodeVersion]")
         print("Example: claude-click xcode-run ~/Desktop/MyProject.xcodeproj MyApp")
-        print("Example: claude-click xcode-run ~/Desktop/MyProject.xcodeproj MyApp --xcode Xcode3")
+        print("Example: claude-click xcode-run ~/Desktop/MyProject.xcodeproj MyApp --xcode Xcode-beta")
         exit(1)
     }
 

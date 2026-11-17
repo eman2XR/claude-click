@@ -1,100 +1,69 @@
-# claude-click Installation Guide
+# claude-click Installation Guide (for Claude Code)
 
-## Quick Install
+Follow these steps when a user asks to install claude-click.
+
+## 1. Clone and build
 
 ```bash
-cd ClaudeClick
-./install.sh
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-claude-click check-permissions  # Grant accessibility and screen recording permissions
+git clone https://github.com/eman2XR/claude-click.git ~/claude-click
+cd ~/claude-click/ClaudeClick && ./install.sh
 ```
 
-## Claude Code Integration
+`install.sh` builds a release binary (needs Xcode or the Command Line Tools), installs it to
+`~/bin/claude-click`, and installs the usage skill to `~/.claude/skills/claude-click/SKILL.md`.
 
-### 1. Add Permissions
+## 2. PATH
+
+If `~/bin` is not on the PATH, add it:
+
+```bash
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
+```
+
+## 3. macOS permissions (the user must do this)
+
+The app that runs Claude Code (Terminal, iTerm, VS Code, ...) needs both:
+
+- System Settings > Privacy & Security > Accessibility
+- System Settings > Privacy & Security > Screen Recording
+
+Open the panes for the user:
+
+```bash
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+```
+
+After granting, the user must quit and reopen that app. Then verify:
+
+```bash
+~/bin/claude-click check-permissions
+```
+
+## 4. Optional: allow without prompts
 
 Add to `~/.claude/settings.json`:
 
 ```json
-{
-  "permissions": {
-    "allow": [
-      "Bash(~/bin/claude-click:*)",
-      "Bash(sleep * && ~/bin/claude-click:*)"
-    ]
-  }
-}
+{ "permissions": { "allow": ["Bash(~/bin/claude-click:*)"] } }
 ```
 
-### 2. Add to Global CLAUDE.md
+## 5. Restart Claude Code
 
-**Important:** Add these guidelines to `~/.claude/CLAUDE.md` to prevent issues with UI automation:
+New sessions load the claude-click skill automatically.
 
-```markdown
-## claude-click Usage
-
-**App Activation (CRITICAL):**
-- ❌ NEVER use `osascript -e 'tell application "X" to activate'` - launches duplicates
-- ✅ Use `~/bin/claude-click activate-app X` instead (safe, won't launch)
-- After `wait-for-app-launch --activate`, no reactivation needed
-
-**Xcode App Testing:**
-- ❌ NEVER use `open -a AppName` after Xcode Cmd+R - creates duplicates
-- ✅ Use: `shortcut cmd r` → `wait-for-app-launch "App" 60 --activate`
-
-**Tool Priority:**
-1. Accessibility API first: `find-click "Button" "App"`
-2. OCR if AX fails: `find-text-ocr "Text" "App"`
-3. Screenshots for verification only
-
-**Smart Waiting:**
-- Use `wait-for-app-launch App 10 --activate` for app launches
-- Use `wait-for-element "Name" "App" 5` for UI loads (polls every 100ms)
-- Avoid fixed `sleep` delays when possible
-
-**Keyboard Input Safety:**
-- Always verify focus with `focused-app` before `type` or `press-key`
-- Or use `find-click` first (auto-activates target app)
-- Safe shortcuts: cmd+r, cmd+c/v/x, cmd+z, cmd+a
-- Blocked shortcuts: cmd+n, cmd+t, cmd+l, cmd+f (cause focus loss)
-
-**Screenshot Best Practices:**
-- Use .jpg for speed (default): `screenshot test.jpg`
-- Use .png only when high quality needed: `screenshot test.png`
-- Take screenshots after important actions for verification
-```
-
-### 3. Optional Tool Registration
-
-Add as a tool (optional):
+## Verify
 
 ```bash
-mkdir -p ~/.claude/tools && cat > ~/.claude/tools/claude-click.json << 'EOF'
-{
-  "name": "claude-click",
-  "description": "macOS UI automation - clicks, types, screenshots",
-  "command": "~/bin/claude-click",
-  "args": []
-}
-EOF
+~/bin/claude-click --help
+~/bin/claude-click observe
+~/bin/claude-click list-apps
 ```
 
-### 4. Restart Claude Code
-
-Restart Claude Code after making these changes.
-
-## Verification
-
-```bash
-claude-click --help                      # Show all commands
-claude-click check-permissions           # Verify permissions
-claude-click list-apps                   # List running apps
-claude-click find-click "Close" "Safari" # Test clicking
-```
+An on-screen "claude-click active" badge appears while commands run; `claude-click indicator disable` turns it off.
 
 ## Troubleshooting
 
-- **App not found?** Use `list-apps` to find exact name (e.g., "Xcode3" not "Xcode")
-- **Keyboard not working?** Check focus with `focused-app`, use `find-click` first
-- **Testing Xcode apps?** Never use `open -a` - use `shortcut cmd r` + `wait-for-app-launch`
+- Commands do nothing or report missing permissions: re-check step 3 and restart the terminal app.
+- `swift build` fails with "sandbox_apply: Operation not permitted": `install.sh` already passes `--disable-sandbox`; run it from a normal terminal.
+- App not found: `claude-click list-apps` shows exact running names.

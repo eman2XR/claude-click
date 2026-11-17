@@ -35,7 +35,6 @@ Create a macOS command-line tool for automated testing and UI interaction that p
 - Accessibility permissions: GRANTED
 - Multi-display support: WORKING
 - Animated mouse movement: 0.3s with ease-in-out interpolation
-- Element monitor: Start manually with `~/bin/claude-click start-monitor 0.5 &`
 - OCR text finding: Native macOS Vision framework integration
 
 ### Commands Available
@@ -340,13 +339,6 @@ Correctly handles Retina display scaling:
 - Logical coordinates: 1512x982 points (scale factor 2.0)
 - All click operations use logical coordinate system
 
-### Element Monitor (Manual Start)
-To use find-click or find-text-ocr commands effectively:
-- Start the monitor daemon manually: `~/bin/claude-click start-monitor 0.5 &`
-- Daemon continuously updates element data to /tmp/screen-elements.json and /tmp/focused-app.json
-- Updates every 0.5 seconds (configurable)
-- Provides fast element lookups for interactive commands
-- Stop with: `~/bin/claude-click stop-daemon`
 
 ### Binary Types
 - **Debug binary** (`.build/debug/claude-click`): Rebuilt on each `swift build`, loses permissions
@@ -494,11 +486,11 @@ When using element finding with multiple windows:
 ## Future Enhancements
 
 ### Potential Future Features
-- Mouse position reading (`mouse-pos`)
+- Cursor position reading (`cursor-position`)
 - Mouse movement without clicking (`move`)
-- Element verification (`verify-element`, `wait-for-element`)
+- Element verification (`element-exists`, `wait-for-element`)
 - Element information queries (`get-element-info`)
-- List all elements (`list-elements`)
+- Structured observation (`observe`) and element dumps (`dump`)
 - Screen configuration display (`screen-info`)
 - Grid screenshots for coordinate identification (`grid-screenshot`)
 - Right-click support

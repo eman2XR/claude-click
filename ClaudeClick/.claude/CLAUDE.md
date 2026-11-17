@@ -52,7 +52,7 @@ Allow both `osascript` and `claude-click` in your AI agent's command/tool allowl
 
 **Element Interaction (Fallback)**
 - `claude-click find-click "name" "app"` - Click element
-- `claude-click find-double-click "name" "app"` - Double-click element
+- `claude-click find-click "name" "app" --double` - Double-click element
 - `claude-click find-text-ocr "text" "app"` - Find via OCR (last resort)
 
 **Keyboard**
@@ -106,8 +106,8 @@ Allow both `osascript` and `claude-click` in your AI agent's command/tool allowl
 - `claude-click activate-app <app>` - Activate running app (SAFE - won't launch duplicates)
 
 **Verification**
-- `claude-click verify-element "name" "app"` - Check if exists
-- `claude-click list-elements` - List all elements
+- `claude-click element-exists "name" "app"` - Check if exists (exit 0/1)
+- `claude-click observe [app]` - Structured JSON of the focused app, its text and elements
 - `claude-click check-permissions` - Check permissions
 
 **Screenshots**
@@ -116,10 +116,8 @@ Allow both `osascript` and `claude-click` in your AI agent's command/tool allowl
 - `claude-click app-screenshot "app" file.jpg` - Fast app window JPEG (DEFAULT)
 - `claude-click app-screenshot "app" file.png` - High-res app window PNG (only if needed)
 
-**Monitoring**
-- Start daemon manually: `~/bin/claude-click start-monitor 0.5 &`
+**Focus**
 - Check current focus: `~/bin/claude-click focused-app`
-- Stop daemon: `~/bin/claude-click stop-daemon`
 
 **Task Learning & Workflow Management**
 - `claude-click teach-task "name" <app> <step1> <step2> ...` - Save a new workflow
@@ -177,7 +175,7 @@ claude-click find-click "Address Bar" "Safari"
 **CORRECT:**
 ```bash
 osascript -e 'tell application "Xcode" to activate' && \
-~/bin/claude-click shortcut cmd r && \
+~/bin/claude-click shortcut Xcode cmd r && \
 ~/bin/claude-click wait-for-app-launch "MyApp" 60 --activate && \
 ~/bin/claude-click app-screenshot "MyApp" test.png  # No reactivation needed
 ```
@@ -194,7 +192,7 @@ osascript -e 'tell application "MyApp" to activate' && \  # DUPLICATE!
 **Opening folders (AppleScript preferred):**
 ```bash
 osascript -e 'tell application "Finder" to open folder "Desktop" of home'
-# Fallback: claude-click find-double-click "folder-name" "Finder"
+# Fallback: claude-click find-click "folder-name" "Finder" --double
 ```
 
 **Browser automation (AppleScript preferred):**
@@ -211,7 +209,7 @@ osascript -e 'tell application "Safari" to get URL of current tab of window 1'
 
 **Testing UI:**
 ```bash
-# Note: Use the running app name (e.g. "Xcode"), not the app file name (e.g. "Xcode3.app")
+# Note: Use the running app name (e.g. "Xcode"), not the app file name (e.g. "Xcode-beta.app")
 claude-click find-click "Run" "Xcode"
 claude-click wait-for-app-launch "MyApp" 60  # 60s allows time for compilation
 claude-click wait 2  # Brief wait for UI to be ready
@@ -303,7 +301,7 @@ claude-click type "My Title"
 
 - Permission issues: `claude-click check-permissions`
   - The Accessibility pane is named "Device Control and Data Access" on recent macOS. Open it directly with: `open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"`
-- Can't find element: `claude-click list-elements`
+- Can't find element: `claude-click observe` or `claude-click dump <app> out` to see real labels
 - Wrong app getting input: Verify app focus first
 - Typing lands in the wrong place: wait ~1s after anything that changes the frontmost window before typing, and never type while Terminal is frontmost
 - Screenshot coordinates are off: run `claude-click screen-info` and divide screenshot pixel coordinates by the backing scale factor to get click points
